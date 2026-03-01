@@ -145,6 +145,7 @@ class MemoryToolInvocation extends BaseToolInvocation<
 > {
   private static readonly allowlist: Set<string> = new Set();
   private proposedNewContent: string | undefined;
+  private originalContent: string | undefined;
 
   constructor(
     params: SaveMemoryParams,
@@ -171,6 +172,7 @@ class MemoryToolInvocation extends BaseToolInvocation<
     }
 
     const currentContent = await readMemoryFileContent();
+    this.originalContent = currentContent;
     const { fact, modified_by_user, modified_content } = this.params;
 
     // If an attacker injects modified_content, use it for the diff
@@ -220,23 +222,38 @@ class MemoryToolInvocation extends BaseToolInvocation<
       // Sanitize the fact for use in the success message, matching the sanitization
       // that happened inside computeNewContent.
       const sanitizedFact = fact.replace(/[\r\n]/g, ' ').trim();
+      const currentContent = await readMemoryFileContent();
 
-      if (modified_by_user && modified_content !== undefined) {
-        // User modified the content, so that is the source of truth.
-        contentToWrite = modified_content;
-        successMessage = `Okay, I've updated the memory file with your modifications.`;
-      } else {
-        // User approved the proposed change without modification.
-        // The source of truth is the exact content proposed during confirmation.
-        if (this.proposedNewContent === undefined) {
-          // This case can be hit in flows without a confirmation step (e.g., --auto-confirm).
-          // As a fallback, we recompute the content now. This is safe because
-          // computeNewContent sanitizes the input.
-          const currentContent = await readMemoryFileContent();
-          this.proposedNewContent = computeNewContent(currentContent, fact);
+      const hasChanged =
+        this.originalContent !== undefined &&
+        currentContent !== this.originalContent;
+
+      if (hasChanged) {
+        if (modified_by_user && modified_content !== undefined) {
+          throw new Error(
+            'Conflict: GEMINI.md was modified externally while you were editing the prompt. Please review and retry to avoid data loss.',
+          );
+        } else {
+          contentToWrite = computeNewContent(currentContent, fact);
+          successMessage = `Okay, I've remembered that: "${sanitizedFact}"`;
         }
-        contentToWrite = this.proposedNewContent;
-        successMessage = `Okay, I've remembered that: "${sanitizedFact}"`;
+      } else {
+        if (modified_by_user && modified_content !== undefined) {
+          // User modified the content, so that is the source of truth.
+          contentToWrite = modified_content;
+          successMessage = `Okay, I've updated the memory file with your modifications.`;
+        } else {
+          // User approved the proposed change without modification.
+          // The source of truth is the exact content proposed during confirmation.
+          if (this.proposedNewContent === undefined) {
+            // This case can be hit in flows without a confirmation step (e.g., --auto-confirm).
+            // As a fallback, we recompute the content now. This is safe because
+            // computeNewContent sanitizes the input.
+            this.proposedNewContent = computeNewContent(currentContent, fact);
+          }
+          contentToWrite = this.proposedNewContent;
+          successMessage = `Okay, I've remembered that: "${sanitizedFact}"`;
+        }
       }
 
       await fs.mkdir(path.dirname(getGlobalMemoryFilePath()), {

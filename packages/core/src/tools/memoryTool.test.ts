@@ -231,6 +231,79 @@ describe('MemoryTool', () => {
         ToolErrorType.MEMORY_TOOL_EXECUTION_ERROR,
       );
     });
+
+    it('should dynamically recompute content if the file changes between confirmation and execution', async () => {
+      const params = { fact: 'fact from prompt' };
+      const invocation = memoryTool.build(params);
+
+      // Phase 1: Confirmation
+      const initialContent = '## Gemini Added Memories\n- old fact\n';
+      vi.mocked(fs.readFile).mockResolvedValue(initialContent);
+
+      const confirmationDetails =
+        await invocation.shouldConfirmExecute(mockAbortSignal);
+      expect(confirmationDetails).not.toBe(false);
+
+      if (confirmationDetails && confirmationDetails.type === 'edit') {
+        await confirmationDetails.onConfirm(
+          ToolConfirmationOutcome.ProceedOnce,
+        );
+      }
+
+      // Phase 2: Execution
+      // Between confirmation and execution, the file was modified externally!
+      const modifiedContent =
+        '## Gemini Added Memories\n- old fact\n- external fact injected\n';
+      vi.mocked(fs.readFile).mockResolvedValue(modifiedContent);
+
+      await invocation.execute(mockAbortSignal);
+
+      // It should NOT write the cached content from Phase 1.
+      // It should write the dynamically recomputed content based on modifiedContent.
+      const expectedNewContent =
+        '## Gemini Added Memories\n- old fact\n- external fact injected\n- fact from prompt\n';
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        expect.any(String),
+        expectedNewContent,
+        'utf-8',
+      );
+    });
+
+    it('should abort and format an error if the file changed AND the user provided custom modifications', async () => {
+      const params = {
+        fact: 'fact from prompt',
+      };
+      const invocation = memoryTool.build(params);
+
+      const initialContent = '## Gemini Added Memories\n- old fact\n';
+      vi.mocked(fs.readFile).mockResolvedValue(initialContent);
+
+      const confirmationDetails =
+        await invocation.shouldConfirmExecute(mockAbortSignal);
+      expect(confirmationDetails).not.toBe(false);
+
+      // Simulate a user modification during the confirmation prompt
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (invocation as any).params.modified_by_user = true;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (invocation as any).params.modified_content =
+        '## Gemini Added Memories\n- old fact\n- USER EDITED FACT\n';
+
+      // Between confirmation and execution, the file was modified externally!
+      const modifiedContent =
+        '## Gemini Added Memories\n- old fact\n- external fact injected\n';
+      vi.mocked(fs.readFile).mockResolvedValue(modifiedContent);
+
+      const result = await invocation.execute(mockAbortSignal);
+
+      expect(result.error).toBeDefined();
+      expect(result.error?.type).toBe(
+        ToolErrorType.MEMORY_TOOL_EXECUTION_ERROR,
+      );
+      expect(result.llmContent).toContain(
+        'Conflict: GEMINI.md was modified externally',
+      );
+    });
   });
 
   describe('shouldConfirmExecute', () => {
